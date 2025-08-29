@@ -7,8 +7,10 @@ import com.jpmc.midascore.repository.UserRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.jpmc.midascore.foundation.Transaction;
+import com.jpmc.midascore.foundation.Incentive;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.web.client.RestTemplate;
 
 @Service
 public class TransactionService {
@@ -17,10 +19,12 @@ public class TransactionService {
     
     private final UserRepository userRepository;
     private final TransactionRecordRepository transactionRecordRepository;
+    private final RestTemplate restTemplate;
 
-    public TransactionService(UserRepository userRepository, TransactionRecordRepository transactionRecordRepository) {
+    public TransactionService(UserRepository userRepository, TransactionRecordRepository transactionRecordRepository, RestTemplate restTemplate) {
         this.userRepository = userRepository;
         this.transactionRecordRepository = transactionRecordRepository;
+        this.restTemplate = restTemplate;
     }
 
     @Transactional
@@ -51,12 +55,28 @@ public class TransactionService {
                 // Add to recipient
                 recipient.setBalance(recipient.getBalance() + tx.getAmount());
 
+                // Call incentive API with the validated transaction
+                float incentiveAmount = 0.0f;
+                try {
+                    Incentive incentive = restTemplate.postForObject("http://localhost:8080/incentive", tx, Incentive.class);
+                    if (incentive != null && incentive.getAmount() >= 0) {
+                        incentiveAmount = incentive.getAmount();
+                    }
+                } catch (Exception ex) {
+                    logger.warn("Incentive API call failed, continuing without incentive: {}", ex.getMessage());
+                }
+
+                // Add incentive to recipient only
+                if (incentiveAmount > 0) {
+                    recipient.setBalance(recipient.getBalance() + incentiveAmount);
+                }
+
                 // Save updated balances
                 userRepository.save(sender);
                 userRepository.save(recipient);
 
                 // Record the transaction
-                TransactionRecord record = new TransactionRecord(sender, recipient, tx.getAmount());
+                TransactionRecord record = new TransactionRecord(sender, recipient, tx.getAmount(), incentiveAmount);
                 transactionRecordRepository.save(record);
 
                 logger.info("Transaction processed successfully. Sender {} -> Recipient {}: Amount {}", 
@@ -76,7 +96,6 @@ public class TransactionService {
             return false;
         }
     }
-    
     private void logAllUserBalances() {
         logger.info("=== Current User Balances ===");
         Iterable<UserRecord> allUsers = userRepository.findAll();
